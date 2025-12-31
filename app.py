@@ -11,7 +11,7 @@ import base64
 app = Flask(__name__)
 
 # --- KONFIGURASI ---
-MODEL_RMSE = 22000 # Menggunakan RMSE dari Ridge Regression
+MODEL_RMSE = 22000 # RMSE dari Ridge Regression
 
 print("Loading models...")
 try:
@@ -25,26 +25,37 @@ except Exception as e:
     model = None
     available_cities = []
 
-# --- FUNGSI CHART (UPDATED: Hapus grup Deskripsi) ---
+# --- FUNGSI CHART (UPDATED: Logic Harga Baru & Hapus Deskripsi) ---
 def generate_shap_plot(input_df, model, columns):
     coefficients = model.coef_
     input_values = input_df.values[0]
     raw_impacts = coefficients * input_values
     
-    # Hapus kategori 'Deskripsi'
+    # Inisialisasi Kategori
     grouped_impacts = {'Nama Produk': 0, 'Lokasi Toko': 0, 'Harga': 0, 'Diskon': 0, 'Rating': 0, 'Jml Ulasan': 0}
     
     for feature, impact in zip(columns, raw_impacts):
-        if 'tfidf_' in feature or 'name_len' in feature: # desc_len dihapus
+        # 1. Nama Produk
+        if 'tfidf_' in feature or 'name_len' in feature:
             grouped_impacts['Nama Produk'] += impact
+        
+        # 2. Lokasi
         elif 'city_' in feature:
             grouped_impacts['Lokasi Toko'] += impact
-        elif 'price_clean' in feature or 'final_price' in feature:
+        
+        # 3. Harga (Gabungan Original & Final Price)
+        elif 'original_price' in feature or 'final_price' in feature or 'price_clean' in feature: 
             grouped_impacts['Harga'] += impact
+        
+        # 4. Diskon
         elif 'discount_clean' in feature:
             grouped_impacts['Diskon'] += impact
+        
+        # 5. Rating
         elif 'rating_clean' in feature:
             grouped_impacts['Rating'] += impact
+        
+        # 6. Ulasan
         elif 'review_count_clean' in feature:
             grouped_impacts['Jml Ulasan'] += impact
             
@@ -81,7 +92,7 @@ def index():
     warnings = []
     confidence_score = 0
     
-    # 1. Default Values (Deskripsi DIHAPUS)
+    # Default Values
     form_data = {
         'name': '', 
         'price': '', 
@@ -95,43 +106,60 @@ def index():
         try:
             form_data = request.form.to_dict()
             
-            # Ambil Input (Deskripsi DIHAPUS)
+            # --- AMBIL INPUT USER ---
             name_input = request.form.get('name', '')
-            price_input = int(request.form.get('price', 0))
+            
+            # PENTING: Input 'price' di form sekarang dianggap HARGA ASLI (Original Price)
+            original_price_input = int(request.form.get('price', 0))
             discount_input = float(request.form.get('discount', 0))
+            
             rating_input = float(request.form.get('rating', 0))
             review_count_input = int(request.form.get('reviews', 0))
             city_input = request.form.get('city', '')
 
-            # --- Validasi ---
+            # --- VALIDASI ---
             if len(name_input) < 10: warnings.append("Nama produk terlalu pendek.")
-            if price_input < 1000: warnings.append("Harga di bawah Rp1.000 tidak wajar.")
+            if original_price_input < 1000: warnings.append("Harga di bawah Rp1.000 tidak wajar.")
             if rating_input == 5.0 and review_count_input > 50: warnings.append("Rating 5.0 sempurna dengan banyak ulasan mencurigakan.")
 
-            # --- Preprocessing ---
+            # --- PREPROCESSING (LOGIC HARGA BARU) ---
+            
+            # 1. Hitung Final Price (Harga Tayang)
+            # Rumus: Harga Asli * (100% - Diskon%)
+            final_price_calculated = original_price_input * (1 - (discount_input / 100))
+
+            # 2. Siapkan DataFrame Kosong
             input_data = pd.DataFrame(np.zeros((1, len(model_columns))), columns=model_columns)
-            input_data['price_clean'] = price_input
+            
+            # 3. Isi Fitur Numerik
+            # Cek kolom apa yang diharapkan model (original_price, final_price, atau price_clean)
+            if 'original_price' in input_data.columns:
+                input_data['original_price'] = original_price_input
+            
+            if 'final_price' in input_data.columns:
+                input_data['final_price'] = final_price_calculated
+                
+            # Fallback untuk backward compatibility (jika pakai model lama)
+            if 'price_clean' in input_data.columns and 'original_price' not in input_data.columns:
+                input_data['price_clean'] = final_price_calculated
+
             input_data['discount_clean'] = discount_input
             input_data['rating_clean'] = rating_input
             input_data['review_count_clean'] = review_count_input
-            input_data['final_price'] = price_input * (1 - (discount_input / 100))
             input_data['name_len'] = len(name_input)
-            
-            # [HAPUS] desc_len tidak lagi dihitung
-            # input_data['desc_len'] = len(desc_input) 
 
-            # TF-IDF Transform
+            # 4. TF-IDF Transform
             if tfidf_vectorizer:
                 tfidf_matrix = tfidf_vectorizer.transform([name_input]).toarray()
                 for i in range(tfidf_matrix.shape[1]):
                     col_name = f'tfidf_{i}'
                     if col_name in input_data.columns: input_data[col_name] = tfidf_matrix[0, i]
 
-            # One-Hot Encoding Lokasi
+            # 5. One-Hot Encoding Lokasi
             city_col = f'city_{city_input}'
             if city_col in input_data.columns: input_data[city_col] = 1
 
-            # --- Prediksi ---
+            # --- PREDIKSI ---
             if model:
                 raw_prediction = model.predict(input_data)[0]
                 
@@ -144,17 +172,10 @@ def index():
                 
                 plot_url = generate_shap_plot(input_data, model, model_columns)
 
-                # --- CONFIDENCE SCORE (LOGIKA BARU - Tanpa Deskripsi) ---
+                # --- CONFIDENCE SCORE ---
                 base_score = 95
-                
-                if warnings:
-                    base_score -= (len(warnings) * 15)
-                
-                if city_input not in available_cities:
-                    base_score -= 10
-                
-                # [HAPUS] Penalti deskripsi pendek dihapus karena inputnya tidak ada
-                
+                if warnings: base_score -= (len(warnings) * 15)
+                if city_input not in available_cities: base_score -= 10
                 confidence_score = max(10, min(99, base_score))
 
         except Exception as e:
