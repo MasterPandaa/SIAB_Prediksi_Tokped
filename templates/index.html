@@ -44,7 +44,7 @@
                         </div>
                         <div>
                             <p class="text-sm font-semibold text-gray-700">Model Siap</p>
-                            <p class="text-xs text-gray-500">XGBoost/Linear Hybrid</p>
+                            <p class="text-xs text-gray-500">Ridge Regression (29k Data)</p>
                         </div>
                     </div>
                     <div class="w-full bg-gray-200 rounded-full h-1.5 mt-2">
@@ -158,12 +158,6 @@
                                     </div>
                                 </div>
 
-                                <div>
-                                    <label class="block text-sm font-medium text-gray-700 mb-1.5">Deskripsi Singkat</label>
-                                    <textarea name="description" rows="3"
-                                        class="block w-full rounded-lg border-gray-300 bg-gray-50 border focus:ring-2 focus:ring-green-500 focus:border-green-500 sm:text-sm p-3">{{ form.description }}</textarea>
-                                </div>
-
                                 <button type="submit" onclick="showLoading()"
                                     class="w-full flex justify-center items-center px-4 py-3 border border-transparent text-sm font-medium rounded-xl text-white bg-green-600 hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 shadow-lg hover:shadow-xl transition-all transform hover:-translate-y-0.5">
                                     <span id="btnText">Jalankan Prediksi</span>
@@ -176,6 +170,7 @@
                     <div class="xl:col-span-8 space-y-6">
                         {% if prediction %}
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                            
                             <div class="bg-gradient-to-br from-green-600 to-emerald-800 rounded-2xl p-6 text-white shadow-lg relative overflow-hidden">
                                 <div class="absolute top-0 right-0 opacity-10 transform translate-x-4 -translate-y-4">
                                     <i data-lucide="trending-up" class="w-32 h-32"></i>
@@ -193,15 +188,30 @@
 
                             <div class="bg-white rounded-2xl p-6 shadow-sm border border-gray-200 flex flex-col justify-center">
                                 <h4 class="text-gray-500 font-medium text-sm uppercase tracking-wide mb-2">Confidence Level</h4>
+                                {% set conf = (confidence | default(0) | float) %}
                                 <div class="flex items-center space-x-4">
                                     <div class="flex-1">
                                         <div class="h-4 bg-gray-100 rounded-full overflow-hidden">
-                                            <div class="h-full bg-blue-500 rounded-full" style="width: 85%"></div>
+                                            <div class="h-full 
+                                                {% if conf >= 80 %} bg-green-500 
+                                                {% elif conf >= 50 %} bg-yellow-500 
+                                                {% else %} bg-red-500 {% endif %} 
+                                                rounded-full transition-all duration-1000" 
+                                                data-confidence-width="{{ conf }}" style="width: 0%;">
+                                            </div>
                                         </div>
                                     </div>
-                                    <span class="text-2xl font-bold text-gray-800">85%</span>
+                                    <span class="text-2xl font-bold text-gray-800">{{ conf }}%</span>
                                 </div>
-                                <p class="text-xs text-gray-400 mt-2">Berdasarkan data historis produk serupa.</p>
+                                <p class="text-xs text-gray-400 mt-2">
+                                    {% if conf >= 80 %}
+                                        Data lengkap & valid. Prediksi optimal.
+                                    {% elif conf >= 50 %}
+                                        Data cukup, namun ada beberapa anomali.
+                                    {% else %}
+                                        Hati-hati, input kurang detail/mencurigakan.
+                                    {% endif %}
+                                </p>
                             </div>
                         </div>
 
@@ -249,8 +259,13 @@
     <script>
         lucide.createIcons();
 
+        document.querySelectorAll('[data-confidence-width]').forEach((el) => {
+            const raw = el.getAttribute('data-confidence-width');
+            const value = Number(raw);
+            el.style.width = `${Number.isFinite(value) ? value : 0}%`;
+        });
+
         function showLoading() {
-            // Sederhana: ubah text tombol saat submit
             const btnText = document.getElementById('btnText');
             const btnLoader = document.getElementById('btnLoader');
             btnText.innerText = 'Menganalisis...';
