@@ -15,18 +15,23 @@ MODEL_RMSE = 22000 # RMSE dari Ridge Regression
 
 print("Loading models...")
 try:
+    # Load semua aset model termasuk Scaler
     model = joblib.load('models/model_linreg.pkl')
     tfidf_vectorizer = joblib.load('models/tfidf.pkl')
     model_columns = joblib.load('models/feature_columns.pkl')
+    scaler = joblib.load('models/scaler.pkl') # <--- TAMBAHAN: Load Scaler
+    
     available_cities = sorted([col.replace('city_', '') for col in model_columns if col.startswith('city_')])
-    print("Models loaded successfully!")
+    print("Models & Scaler loaded successfully!")
 except Exception as e:
     print(f"Error loading models: {e}")
     model = None
+    scaler = None
     available_cities = []
 
-# --- FUNGSI CHART (UPDATED: Logic Harga Baru & Hapus Deskripsi) ---
+# --- FUNGSI CHART ---
 def generate_shap_plot(input_df, model, columns):
+    # input_df di sini sudah dalam bentuk scaled (karena diproses sebelum masuk fungsi ini)
     coefficients = model.coef_
     input_values = input_df.values[0]
     raw_impacts = coefficients * input_values
@@ -43,7 +48,7 @@ def generate_shap_plot(input_df, model, columns):
         elif 'city_' in feature:
             grouped_impacts['Lokasi Toko'] += impact
         
-        # 3. Harga (Gabungan Original & Final Price)
+        # 3. Harga
         elif 'original_price' in feature or 'final_price' in feature or 'price_clean' in feature: 
             grouped_impacts['Harga'] += impact
         
@@ -66,12 +71,13 @@ def generate_shap_plot(input_df, model, columns):
     colors = ['#ef4444' if x < 0 else '#10b981' for x in df_plot['Impact']]
     
     bars = plt.barh(df_plot['Fitur'], df_plot['Impact'], color=colors, alpha=0.9)
-    plt.xlabel('Kontribusi Unit', fontsize=10, fontweight='bold', color='#374151')
+    plt.xlabel('Kontribusi (Scaled)', fontsize=10, fontweight='bold', color='#374151')
     plt.title('Analisis Faktor Penentu', fontsize=12, fontweight='bold', color='#111827', loc='left')
     plt.grid(axis='x', linestyle='--', alpha=0.3)
     plt.gca().spines['top'].set_visible(False)
     plt.gca().spines['right'].set_visible(False)
     
+    # Label pada bar
     for bar in bars:
         width = bar.get_width()
         label_x_pos = width if width > 0 else width
@@ -92,7 +98,7 @@ def index():
     warnings = []
     confidence_score = 0
     
-    # Default Values
+    # Default Values Form HTML
     form_data = {
         'name': '', 
         'price': '', 
@@ -106,61 +112,60 @@ def index():
         try:
             form_data = request.form.to_dict()
             
-            # --- AMBIL INPUT USER ---
+            # --- 1. AMBIL INPUT USER ---
             name_input = request.form.get('name', '')
-            
-            # PENTING: Input 'price' di form sekarang dianggap HARGA ASLI (Original Price)
             original_price_input = int(request.form.get('price', 0))
             discount_input = float(request.form.get('discount', 0))
-            
             rating_input = float(request.form.get('rating', 0))
             review_count_input = int(request.form.get('reviews', 0))
             city_input = request.form.get('city', '')
 
-            # --- VALIDASI ---
+            # --- 2. VALIDASI INPUT ---
             if len(name_input) < 10: warnings.append("Nama produk terlalu pendek.")
             if original_price_input < 1000: warnings.append("Harga di bawah Rp1.000 tidak wajar.")
             if rating_input == 5.0 and review_count_input > 50: warnings.append("Rating 5.0 sempurna dengan banyak ulasan mencurigakan.")
 
-            # --- PREPROCESSING (LOGIC HARGA BARU) ---
+            # --- 3. PREPROCESSING (LOGIC UTAMA) ---
             
-            # 1. Hitung Final Price (Harga Tayang)
-            # Rumus: Harga Asli * (100% - Diskon%)
+            # A. Hitung Final Price
             final_price_calculated = original_price_input * (1 - (discount_input / 100))
 
-            # 2. Siapkan DataFrame Kosong
+            # B. Siapkan DataFrame Input (Sesuai Kolom Model)
             input_data = pd.DataFrame(np.zeros((1, len(model_columns))), columns=model_columns)
             
-            # 3. Isi Fitur Numerik
-            # Cek kolom apa yang diharapkan model (original_price, final_price, atau price_clean)
-            if 'original_price' in input_data.columns:
-                input_data['original_price'] = original_price_input
+            # C. Isi Data Mentah ke DataFrame
+            # Pastikan nama kolom di sini SAMA PERSIS dengan training
+            if 'original_price' in input_data.columns: input_data['original_price'] = original_price_input
+            if 'final_price' in input_data.columns: input_data['final_price'] = final_price_calculated
+            if 'discount_clean' in input_data.columns: input_data['discount_clean'] = discount_input
+            if 'rating_clean' in input_data.columns: input_data['rating_clean'] = rating_input
+            if 'review_count_clean' in input_data.columns: input_data['review_count_clean'] = review_count_input
+            if 'name_len' in input_data.columns: input_data['name_len'] = len(name_input)
+
+            # D. PENERAPAN STANDARD SCALER (WAJIB DILAKUKAN SEBELUM PREDIKSI)
+            # List kolom numerik harus urut sesuai saat training
+            numeric_cols = ['final_price', 'original_price', 'discount_clean', 'rating_clean', 'review_count_clean', 'name_len']
             
-            if 'final_price' in input_data.columns:
-                input_data['final_price'] = final_price_calculated
-                
-            # Fallback untuk backward compatibility (jika pakai model lama)
-            if 'price_clean' in input_data.columns and 'original_price' not in input_data.columns:
-                input_data['price_clean'] = final_price_calculated
-
-            input_data['discount_clean'] = discount_input
-            input_data['rating_clean'] = rating_input
-            input_data['review_count_clean'] = review_count_input
-            input_data['name_len'] = len(name_input)
-
-            # 4. TF-IDF Transform
+            if scaler:
+                # Transform hanya kolom numerik
+                input_data[numeric_cols] = scaler.transform(input_data[numeric_cols])
+            
+            # E. TF-IDF Transform (Teks)
             if tfidf_vectorizer:
                 tfidf_matrix = tfidf_vectorizer.transform([name_input]).toarray()
                 for i in range(tfidf_matrix.shape[1]):
                     col_name = f'tfidf_{i}'
-                    if col_name in input_data.columns: input_data[col_name] = tfidf_matrix[0, i]
+                    if col_name in input_data.columns: 
+                        input_data[col_name] = tfidf_matrix[0, i]
 
-            # 5. One-Hot Encoding Lokasi
+            # F. One-Hot Encoding Lokasi
             city_col = f'city_{city_input}'
-            if city_col in input_data.columns: input_data[city_col] = 1
+            if city_col in input_data.columns: 
+                input_data[city_col] = 1
 
-            # --- PREDIKSI ---
+            # --- 4. PREDIKSI ---
             if model:
+                # Model menerima data yang sudah di-scaled + tfidf + onehot
                 raw_prediction = model.predict(input_data)[0]
                 
                 lower_bound = max(0, int(raw_prediction - MODEL_RMSE))
@@ -170,9 +175,10 @@ def index():
                 prediction_text = f"{predicted_sales:,}"
                 prediction_range = f"{lower_bound:,} - {upper_bound:,}"
                 
+                # Plot juga menggunakan data yang sudah di-scaled
                 plot_url = generate_shap_plot(input_data, model, model_columns)
 
-                # --- CONFIDENCE SCORE ---
+                # Score Keyakinan (Sederhana)
                 base_score = 95
                 if warnings: base_score -= (len(warnings) * 15)
                 if city_input not in available_cities: base_score -= 10
@@ -180,6 +186,7 @@ def index():
 
         except Exception as e:
             warnings.append(f"Terjadi kesalahan sistem: {str(e)}")
+            print(f"DEBUG ERROR: {e}") # Print error ke terminal untuk debugging
 
     return render_template('index.html', 
                            prediction=prediction_text, 
