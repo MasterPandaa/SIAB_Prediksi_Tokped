@@ -7,6 +7,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import io
 import base64
+import re # Tambahkan modul regex
 
 app = Flask(__name__)
 
@@ -19,7 +20,7 @@ try:
     model = joblib.load('models/model_linreg.pkl')
     tfidf_vectorizer = joblib.load('models/tfidf.pkl')
     model_columns = joblib.load('models/feature_columns.pkl')
-    scaler = joblib.load('models/scaler.pkl') # <--- TAMBAHAN: Load Scaler
+    scaler = joblib.load('models/scaler.pkl') 
     
     available_cities = sorted([col.replace('city_', '') for col in model_columns if col.startswith('city_')])
     print("Models & Scaler loaded successfully!")
@@ -28,10 +29,11 @@ except Exception as e:
     model = None
     scaler = None
     available_cities = []
+    model_columns = [] # Inisialisasi list kosong jika gagal load
 
 # --- FUNGSI CHART ---
 def generate_shap_plot(input_df, model, columns):
-    # input_df di sini sudah dalam bentuk scaled (karena diproses sebelum masuk fungsi ini)
+    # input_df di sini sudah dalam bentuk scaled
     coefficients = model.coef_
     input_values = input_df.values[0]
     raw_impacts = coefficients * input_values
@@ -89,6 +91,11 @@ def generate_shap_plot(input_df, model, columns):
     img.seek(0)
     return base64.b64encode(img.getvalue()).decode()
 
+def clean_text(text):
+    text = str(text).lower()
+    text = re.sub(r'\b\d+\w*\b', '', text) # Hapus angka/satuan seperti 100gr
+    return text
+
 # --- ROUTE UTAMA ---
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -134,7 +141,6 @@ def index():
             input_data = pd.DataFrame(np.zeros((1, len(model_columns))), columns=model_columns)
             
             # C. Isi Data Mentah ke DataFrame
-            # Pastikan nama kolom di sini SAMA PERSIS dengan training
             if 'original_price' in input_data.columns: input_data['original_price'] = original_price_input
             if 'final_price' in input_data.columns: input_data['final_price'] = final_price_calculated
             if 'discount_clean' in input_data.columns: input_data['discount_clean'] = discount_input
@@ -142,19 +148,23 @@ def index():
             if 'review_count_clean' in input_data.columns: input_data['review_count_clean'] = review_count_input
             if 'name_len' in input_data.columns: input_data['name_len'] = len(name_input)
 
-            # D. PENERAPAN STANDARD SCALER (WAJIB DILAKUKAN SEBELUM PREDIKSI)
-            # List kolom numerik harus urut sesuai saat training
+            # D. PENERAPAN STANDARD SCALER
             numeric_cols = ['final_price', 'original_price', 'discount_clean', 'rating_clean', 'review_count_clean', 'name_len']
             
             if scaler:
-                # Transform hanya kolom numerik
                 input_data[numeric_cols] = scaler.transform(input_data[numeric_cols])
             
             # E. TF-IDF Transform (Teks)
             if tfidf_vectorizer:
-                tfidf_matrix = tfidf_vectorizer.transform([name_input]).toarray()
-                for i in range(tfidf_matrix.shape[1]):
-                    col_name = f'tfidf_{i}'
+                # Bersihkan teks terlebih dahulu
+                name_clean = clean_text(name_input)
+                tfidf_matrix = tfidf_vectorizer.transform([name_clean]).toarray()
+                
+                # Gunakan get_feature_names_out() untuk mapping yang benar
+                feature_names = tfidf_vectorizer.get_feature_names_out()
+                
+                for i, word in enumerate(feature_names):
+                    col_name = f'tfidf_{word}' # Sesuaikan format nama kolom
                     if col_name in input_data.columns: 
                         input_data[col_name] = tfidf_matrix[0, i]
 
@@ -162,10 +172,13 @@ def index():
             city_col = f'city_{city_input}'
             if city_col in input_data.columns: 
                 input_data[city_col] = 1
+            else:
+                 # Jika kota tidak ada di list model, masukkan ke 'Other' jika ada
+                if 'city_Other' in input_data.columns:
+                    input_data['city_Other'] = 1
 
             # --- 4. PREDIKSI ---
             if model:
-                # Model menerima data yang sudah di-scaled + tfidf + onehot
                 raw_prediction = model.predict(input_data)[0]
                 
                 lower_bound = max(0, int(raw_prediction - MODEL_RMSE))
@@ -175,10 +188,9 @@ def index():
                 prediction_text = f"{predicted_sales:,}"
                 prediction_range = f"{lower_bound:,} - {upper_bound:,}"
                 
-                # Plot juga menggunakan data yang sudah di-scaled
                 plot_url = generate_shap_plot(input_data, model, model_columns)
 
-                # Score Keyakinan (Sederhana)
+                # Score Keyakinan
                 base_score = 95
                 if warnings: base_score -= (len(warnings) * 15)
                 if city_input not in available_cities: base_score -= 10
@@ -186,7 +198,7 @@ def index():
 
         except Exception as e:
             warnings.append(f"Terjadi kesalahan sistem: {str(e)}")
-            print(f"DEBUG ERROR: {e}") # Print error ke terminal untuk debugging
+            print(f"DEBUG ERROR: {e}") 
 
     return render_template('index.html', 
                            prediction=prediction_text, 
